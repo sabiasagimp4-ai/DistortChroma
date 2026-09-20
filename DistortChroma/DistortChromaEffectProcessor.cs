@@ -1,8 +1,4 @@
-﻿using DistortChroma;
-using System;
-using Vortice;
-using Vortice.Direct2D1;
-using Vortice.Mathematics;
+﻿using Vortice.Direct2D1;
 using YukkuriMovieMaker.Commons;
 using YukkuriMovieMaker.Player.Video;
 using YukkuriMovieMaker.Plugin.Brush;
@@ -13,11 +9,11 @@ namespace DistortChroma
     {
         private readonly DistortChromaEffect item;
         private readonly IGraphicsDevicesAndContext devices;
-        private ID2D1Image? input;
-        private DistortChromaCustomEffect? _distortEffect;
 
+        private ID2D1Image? input;
+        private DistortChromaCustomEffect? distortEffect;
         private IBrushSource? brushSource;
-        private ID2D1CommandList? patternCommandList;
+        private ID2D1CommandList? mapCommandList;
 
         public ID2D1Image Output { get; private set; } = null!;
 
@@ -27,25 +23,22 @@ namespace DistortChroma
             this.item = item;
         }
 
-        public void SetInput(ID2D1Image? input) { this.input = input; }
+        public void SetInput(ID2D1Image? input) => this.input = input;
+
+        public void ClearInput() => this.input = null;
 
         public DrawDescription Update(EffectDescription effectDescription)
         {
-            if (Output != null) { Output.Dispose(); Output = null!; }
-            if (this.input == null) return effectDescription.DrawDescription;
+            Output?.Dispose();
+            Output = null!;
 
-            var frame = effectDescription.ItemPosition.Frame;
-            var length = effectDescription.ItemDuration.Frame;
-            var fps = effectDescription.FPS;
-
-            float amount = (float)item.Amount.GetValue(frame, length, fps);
-            float blur = (float)item.Blur.GetValue(frame, length, fps);
-            float steps = (float)item.Steps.GetValue(frame, length, fps);
-            float angle = (float)item.Angle.GetValue(frame, length, fps);
+            var source = input;
+            if (source is null)
+                return effectDescription.DrawDescription;
 
             try
             {
-                _distortEffect ??= new DistortChromaCustomEffect(devices);
+                distortEffect ??= new DistortChromaCustomEffect(devices);
             }
             catch
             {
@@ -53,63 +46,62 @@ namespace DistortChroma
                 return effectDescription.DrawDescription;
             }
 
-            _distortEffect.SetInput(0, this.input, true);
+            var frame = effectDescription.ItemPosition.Frame;
+            var length = effectDescription.ItemDuration.Frame;
+            var fps = effectDescription.FPS;
 
-            // ソースに「別の画像・シーン」が選ばれている場合
-            if (item.SourceMode == DistortChromaMapSource.Other)
-            {
-                brushSource ??= item.Brush.CreateBrush(devices);
-                brushSource.Update((TimelineItemSourceDescription)effectDescription);
+            distortEffect.Amount = (float)item.Amount.GetValue(frame, length, fps);
+            distortEffect.Blur = (float)item.Blur.GetValue(frame, length, fps);
+            distortEffect.Steps = (float)item.Steps.GetValue(frame, length, fps);
+            distortEffect.Angle = (float)item.Angle.GetValue(frame, length, fps);
 
-                var deviceContext = devices.DeviceContext;
-                var bounds = deviceContext.GetImageLocalBounds(this.input);
+            distortEffect.SetInput(0, source, true);
+            distortEffect.SetInput(1, item.SourceMode == DistortChromaMapSource.Other ? RenderMap(effectDescription, source) : source, true);
 
-                patternCommandList?.Dispose();
-                patternCommandList = deviceContext.CreateCommandList();
-
-                deviceContext.Target = patternCommandList;
-                deviceContext.BeginDraw();
-                deviceContext.Clear(null);
-
-                // ★ 最適化：巨大なパッド付き(rect)ではなく、元の画像サイズ(bounds)に描画を限定します。
-                // これにより、どれだけ歪み強度を大きくしても、別画像・シーンのレンダリング負荷が肥大化しません。
-                deviceContext.FillRectangle(bounds, brushSource.Brush);
-
-                deviceContext.EndDraw();
-                deviceContext.Target = null;
-                patternCommandList.Close();
-
-                _distortEffect.SetInput(1, patternCommandList, true); // t1に画像を渡す
-            }
-            else
-            {
-                // アイテム自身をソースとする場合
-                _distortEffect.SetInput(1, this.input, true); // t1に自身を渡す
-            }
-
-            _distortEffect.Amount = amount;
-            _distortEffect.Blur = blur;
-            _distortEffect.Steps = steps;
-            _distortEffect.Angle = angle;
-
-            Output = _distortEffect.Output;
-
+            Output = distortEffect.Output;
             return effectDescription.DrawDescription;
         }
 
-        public void ClearInput() { this.input = null; }
+        // 「別の画像・シーン」用のマップを描き起こす。ブラシは1フレームごとに変化しうるので毎回描き直す。
+        private ID2D1CommandList RenderMap(EffectDescription effectDescription, ID2D1Image source)
+        {
+            brushSource ??= item.Brush.CreateBrush(devices);
+            brushSource.Update((TimelineItemSourceDescription)effectDescription);
+
+            var deviceContext = devices.DeviceContext;
+            // 余白付きの範囲ではなく元の画像サイズに描画を限定する。
+            // これにより歪み強度をいくら上げても、マップ側のレンダリング負荷は増えない。
+            var bounds = deviceContext.GetImageLocalBounds(source);
+
+            mapCommandList?.Dispose();
+            mapCommandList = deviceContext.CreateCommandList();
+
+            deviceContext.Target = mapCommandList;
+            deviceContext.BeginDraw();
+            deviceContext.Clear(null);
+            deviceContext.FillRectangle(bounds, brushSource.Brush);
+            deviceContext.EndDraw();
+            deviceContext.Target = null;
+            mapCommandList.Close();
+
+            return mapCommandList;
+        }
 
         public void Dispose()
         {
-            _distortEffect?.SetInput(0, null, true);
-            _distortEffect?.SetInput(1, null, true);
-            _distortEffect?.Dispose(); _distortEffect = null;
+            distortEffect?.SetInput(0, null, true);
+            distortEffect?.SetInput(1, null, true);
+            distortEffect?.Dispose();
+            distortEffect = null;
 
-            patternCommandList?.Dispose(); patternCommandList = null;
-            brushSource?.Dispose(); brushSource = null;
+            mapCommandList?.Dispose();
+            mapCommandList = null;
+            brushSource?.Dispose();
+            brushSource = null;
 
-            Output?.Dispose(); Output = null!;
-            this.input = null;
+            Output?.Dispose();
+            Output = null!;
+            input = null;
         }
     }
 }

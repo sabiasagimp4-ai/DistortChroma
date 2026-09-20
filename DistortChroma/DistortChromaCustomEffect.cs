@@ -1,5 +1,4 @@
-﻿using System;
-using System.IO;
+﻿using System.Reflection;
 using System.Runtime.InteropServices;
 using Vortice;
 using Vortice.Direct2D1;
@@ -18,7 +17,7 @@ namespace DistortChroma
         public DistortChromaCustomEffect(IGraphicsDevicesAndContext devices) : base(Create<EffectImpl>(devices)) { }
 
         [StructLayout(LayoutKind.Sequential)]
-        struct ConstantBuffer
+        private struct ConstantBuffer
         {
             public float Amount;
             public float Blur;
@@ -28,26 +27,27 @@ namespace DistortChroma
 
         private enum Props { Amount, Blur, Steps, Angle }
 
-        // ★入力を2つ（描画用 t0, マップ用 t1）にするため 2 を指定
+        // 入力は2つ（描画用 t0、マップ用 t1）
         [CustomEffect(2)]
         private class EffectImpl : D2D1CustomShaderEffectImplBase<EffectImpl>
         {
-            private ConstantBuffer constants;
+            private const string ShaderResourceName = "DistortChroma.Shaders.DistortChromaShader.cso";
 
-            protected override void UpdateConstants()
-            {
-                if (drawInformation != null) drawInformation.SetPixelShaderConstantBuffer(constants);
-            }
+            private ConstantBuffer constants = new() { Amount = 10f, Blur = 3f, Steps = 16f, Angle = 0f };
+
+            public EffectImpl() : base(LoadShader()) { }
+
+            protected override void UpdateConstants() => drawInformation?.SetPixelShaderConstantBuffer(constants);
 
             public override void MapInputRectsToOutputRect(RawRect[] inputRects, RawRect[] inputOpaqueSubRects, out RawRect outputRect, out RawRect outputOpaqueSubRect)
             {
-                if (inputRects.Length > 0) outputRect = inputRects[0];
-                else outputRect = new RawRect();
+                outputRect = inputRects.Length > 0 ? inputRects[0] : new RawRect();
                 outputOpaqueSubRect = new RawRect();
             }
 
             public override void MapOutputRectToInputRects(RawRect outputRect, RawRect[] inputRects)
             {
+                // 変位量（Amount）と法線ぼかしカーネルの広がり（Blur 依存）の分だけ入力を広げる。
                 int margin = (int)(Math.Abs(constants.Amount) + constants.Blur * 3.0f) + 5;
 
                 var expandedRect = new RawRect(
@@ -55,24 +55,18 @@ namespace DistortChroma
                     outputRect.Right + margin, outputRect.Bottom + margin
                 );
 
-                // 入力0（自身）と入力1（マップ）の両方に余白付きの範囲を要求する
-                if (inputRects.Length > 0) inputRects[0] = expandedRect;
-                if (inputRects.Length > 1) inputRects[1] = expandedRect;
+                // 入力0（描画元）と入力1（マップ）の両方に余白付きの範囲を要求する
+                for (int i = 0; i < inputRects.Length; i++)
+                    inputRects[i] = expandedRect;
             }
 
             private static byte[] LoadShader()
             {
-                var assembly = System.Reflection.Assembly.GetExecutingAssembly();
-                using var stream = assembly.GetManifestResourceStream("DistortChroma.Shaders.DistortChromaShader.cso");
-                if (stream == null) throw new FileNotFoundException("DistortChromaShader.cso not found");
+                using var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(ShaderResourceName)
+                    ?? throw new FileNotFoundException($"{ShaderResourceName} not found");
                 using var ms = new MemoryStream();
                 stream.CopyTo(ms);
                 return ms.ToArray();
-            }
-
-            public EffectImpl() : base(LoadShader())
-            {
-                constants = new ConstantBuffer { Amount = 10f, Blur = 3f, Steps = 10f, Angle = 0f };
             }
 
             [CustomEffectProperty(PropertyType.Float, (int)Props.Amount)] public float Amount { get => constants.Amount; set { constants.Amount = value; UpdateConstants(); } }

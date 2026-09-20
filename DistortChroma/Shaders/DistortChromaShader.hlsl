@@ -1,19 +1,9 @@
 Texture2D InputTexture : register(t0);
-SamplerState InputSampler : register(s0)
-{
-    Filter = MIN_MAG_MIP_LINEAR;
-    AddressU = CLAMP;
-    AddressV = CLAMP;
-};
+SamplerState InputSampler : register(s0);
 
-// ★ マップ（ノーマル計算元ソース）用のテクスチャを追加
+// マップ（法線の計算元）用テクスチャ
 Texture2D MapTexture : register(t1);
-SamplerState MapSampler : register(s1)
-{
-    Filter = MIN_MAG_MIP_LINEAR;
-    AddressU = CLAMP;
-    AddressV = CLAMP;
-};
+SamplerState MapSampler : register(s1);
 
 cbuffer Constants : register(b0)
 {
@@ -23,14 +13,13 @@ cbuffer Constants : register(b0)
     float Angle;
 };
 
-#define WARP_R -1.0
-#define WARP_G 0.0
-#define WARP_B 1.0
-#define COLOR_R float3(1.0, 0.0, 0.0)
-#define COLOR_G float3(0.0, 1.0, 0.0)
-#define COLOR_B float3(0.0, 0.0, 1.0)
+// 法線ぼかしカーネル。半径とσは固定なので、重みはコンパイル時に定数へ畳み込まれる。
+#define NORMAL_BLUR_RADIUS 4
+#define NORMAL_BLUR_SIGMA 2.0
 
-float getLuminance(float3 col)
+static const float3 CHROMA_CENTER = float3(0.0, 0.5, 1.0);
+
+float GetLuminance(float3 col)
 {
     return dot(col, float3(0.2126, 0.7152, 0.0722));
 }
@@ -40,124 +29,107 @@ float2 PixelToUVOffset(float2 pixelOffset, float2 duvdx, float2 duvdy)
     return pixelOffset.x * duvdx + pixelOffset.y * duvdy;
 }
 
-// 法線計算は t1 (MapTexture) からサンプリングするため、map_uv とその偏微分を使用します
-float3 computeNormal(float2 map_uv, float angle_val, float2 dmap_dx, float2 dmap_dy, float blurStrength)
+float MapLuminance(float2 map_uv, float2 pixelOffset, float2 dmap_dx, float2 dmap_dy)
 {
-    float sampleDist = 2.0 + (blurStrength * 0.5);
-    
-    float2 offX = PixelToUVOffset(float2(sampleDist, 0.0), dmap_dx, dmap_dy);
-    float2 offY = PixelToUVOffset(float2(0.0, sampleDist), dmap_dx, dmap_dy);
-    
-    // t1 から輝度差分を計算
-    float gx = getLuminance(MapTexture.SampleLevel(MapSampler, map_uv + offX, 0).rgb)
-             - getLuminance(MapTexture.SampleLevel(MapSampler, map_uv - offX, 0).rgb);
-    float gy = getLuminance(MapTexture.SampleLevel(MapSampler, map_uv + offY, 0).rgb)
-             - getLuminance(MapTexture.SampleLevel(MapSampler, map_uv - offY, 0).rgb);
-             
-    float3 normal = normalize(float3(-gx * 4.0, -gy * 4.0, 1.0));
-    
-    float rad = angle_val * 3.14159265359 / 180.0;
-    float c = cos(rad);
-    float s = sin(rad);
-    
-    float2 rotNormal;
-    rotNormal.x = normal.x * c - normal.y * s;
-    rotNormal.y = normal.x * s + normal.y * c;
-    normal.xy = rotNormal;
-    
-    return normal * 0.5 + 0.5;
+    float2 uv = map_uv + PixelToUVOffset(pixelOffset, dmap_dx, dmap_dy);
+    return GetLuminance(MapTexture.SampleLevel(MapSampler, uv, 0).rgb);
 }
 
-float3 smoothNormalBlur(float2 map_uv, float blurStrength, float angle_val, float2 dmap_dx, float2 dmap_dy)
+float3 NormalFromGradient(float2 gradient, float angle_val)
 {
-    if (blurStrength <= 0.01)
-        return computeNormal(map_uv, angle_val, dmap_dx, dmap_dy, 0.0);
-    
-    float3 result = float3(0, 0, 0);
-    float totalWeight = 0.0;
-    
-    int radius = 4;
-    float stride = 1.0 + (blurStrength * 0.3);
-    float sigma = (float) radius * 0.5;
+    float3 normal = normalize(float3(-gradient * 4.0, 1.0));
 
-    [loop]
-    for (int x = -radius; x <= radius; x++)
+    float rad = radians(angle_val);
+    float c = cos(rad);
+    float s = sin(rad);
+    normal.xy = float2(normal.x * c - normal.y * s,
+                       normal.x * s + normal.y * c);
+    return normal;
+}
+
+// ぼかし無しの場合の輝度勾配。中心差分をそのまま使う。
+float2 SharpGradient(float2 map_uv, float2 dmap_dx, float2 dmap_dy)
+{
+    const float d = 2.0;
+    return float2(
+        MapLuminance(map_uv, float2(d, 0.0), dmap_dx, dmap_dy) - MapLuminance(map_uv, float2(-d, 0.0), dmap_dx, dmap_dy),
+        MapLuminance(map_uv, float2(0.0, d), dmap_dx, dmap_dy) - MapLuminance(map_uv, float2(0.0, -d), dmap_dx, dmap_dy));
+}
+
+// ぼかし有りの場合の輝度勾配。
+// ガウシアンでぼかした法線を平均するのではなく、ガウス微分（DoG）で
+// 「ぼかした輝度の勾配」を直接求める。1タップあたりのサンプルが4回から1回になる。
+// 最後に (4 + Blur) を掛けて、中心差分版（2 * sampleDist）と同じ強度に揃える。
+float2 BlurredGradient(float2 map_uv, float2 dmap_dx, float2 dmap_dy)
+{
+    const int r = NORMAL_BLUR_RADIUS;
+    const float twoSigmaSq = 2.0 * NORMAL_BLUR_SIGMA * NORMAL_BLUR_SIGMA;
+    float stride = 1.0 + Blur * 0.3;
+
+    float2 sum = float2(0.0, 0.0);
+    float norm = 0.0;
+
+    [unroll]
+    for (int y = -r; y <= r; y++)
     {
-        [loop]
-        for (int y = -radius; y <= radius; y++)
+        [unroll]
+        for (int x = -r; x <= r; x++)
         {
-            float2 pixelOffset = float2(x, y) * stride;
-            float2 uvOffset = PixelToUVOffset(pixelOffset, dmap_dx, dmap_dy);
-            
-            float distSq = (x * x + y * y);
-            float weight = exp(-distSq / (2.0 * sigma * sigma));
-            
-            result += computeNormal(map_uv + uvOffset, angle_val, dmap_dx, dmap_dy, blurStrength) * weight;
-            totalWeight += weight;
+            float weight = exp(-(x * x + y * y) / twoSigmaSq);
+            sum += weight * float2(x, y) * MapLuminance(map_uv, float2(x, y) * stride, dmap_dx, dmap_dy);
+            norm += weight * x * x;
         }
     }
-    return result / totalWeight;
+
+    return sum / (norm * stride) * (4.0 + Blur);
 }
 
 float4 main(
     float4 pos : SV_POSITION,
     float4 posScene : SCENE_POSITION,
     float4 uv0 : TEXCOORD0,
-    float4 uv1 : TEXCOORD1 // ★ t1 (MapTexture) 用のUV座標を受け取る
+    float4 uv1 : TEXCOORD1
 ) : SV_Target
 {
     float2 uv = uv0.xy;
-    float2 map_uv = uv1.xy; // ★ MapTexture のサンプリングにはこれを使用する
-    
-    // ベース画像のアルファは t0 (InputTexture) を使用
-    float originalAlpha = InputTexture.Sample(InputSampler, uv).a;
+    float2 map_uv = uv1.xy;
+
+    float originalAlpha = InputTexture.SampleLevel(InputSampler, uv, 0).a;
     if (originalAlpha <= 0.001)
-    {
         return float4(0.0, 0.0, 0.0, 0.0);
-    }
-    
+
     float2 duvdx = ddx(uv);
     float2 duvdy = ddy(uv);
-    
     float2 dmap_dx = ddx(map_uv);
     float2 dmap_dy = ddy(map_uv);
-    
-    // ★ 元のブラー処理（smoothNormalBlur）を維持したまま、バグのない新しい座標系を渡します
-    float3 normal = smoothNormalBlur(map_uv, Blur, Angle, dmap_dx, dmap_dy);
-    
-    float3 texColor = float3(0.0, 0.0, 0.0);
-    float3 blurSum = float3(0.0, 0.0, 0.0);
-    
+
+    // [branch] は必須。三項演算子のままだと両方の経路が実行され、
+    // 滑らかさ=0 でもぼかし用の81タップを払うことになる。
+    // Blur は定数バッファ由来なので分岐は完全にコヒーレントで、コストはない。
+    float2 gradient;
+    [branch]
+    if (Blur <= 0.01)
+        gradient = SharpGradient(map_uv, dmap_dx, dmap_dy);
+    else
+        gradient = BlurredGradient(map_uv, dmap_dx, dmap_dy);
+    float3 normal = NormalFromGradient(gradient, Angle);
+
     int maxSteps = max(3, (int) Steps);
+    float3 texColor = float3(0.0, 0.0, 0.0);
+    float3 weightSum = float3(0.0, 0.0, 0.0);
 
     [loop]
     for (int i = 0; i < maxSteps; i++)
     {
         float fi = (float) i / (float) (maxSteps - 1);
-        
-        float3 Chroma = float3(
-            max(0.0, 1.0 - abs(fi - ((WARP_R + 1.0) * 0.5)) * 2.0),
-            max(0.0, 1.0 - abs(fi - ((WARP_G + 1.0) * 0.5)) * 2.0),
-            max(0.0, 1.0 - abs(fi - ((WARP_B + 1.0) * 0.5)) * 2.0)
-        );
-        
-        float3 blurWeight = (COLOR_R * Chroma.r + COLOR_G * Chroma.g + COLOR_B * Chroma.b);
-        blurSum += blurWeight;
-        
-        float2 displacementPixel = (normal.xy * 2.0 - 1.0) * Amount * fi;
-        float2 displacedUV = uv + PixelToUVOffset(displacementPixel, duvdx, duvdy);
 
-        // 色のサンプリングは描画用である t0 (InputTexture) から行う
-        texColor += blurWeight * InputTexture.Sample(InputSampler, displacedUV).rgb;
+        // R/G/B をそれぞれ fi = 0.0 / 0.5 / 1.0 に寄せる三角形の重み
+        float3 chroma = saturate(1.0 - abs(fi - CHROMA_CENTER) * 2.0);
+        weightSum += chroma;
+
+        float2 displacedUV = uv + PixelToUVOffset(normal.xy * Amount * fi, duvdx, duvdy);
+        texColor += chroma * InputTexture.SampleLevel(InputSampler, displacedUV, 0).rgb;
     }
 
-    float3 finalRGB = float3(0, 0, 0);
-    if (blurSum.r > 0.001)
-        finalRGB.r = texColor.r / blurSum.r;
-    if (blurSum.g > 0.001)
-        finalRGB.g = texColor.g / blurSum.g;
-    if (blurSum.b > 0.001)
-        finalRGB.b = texColor.b / blurSum.b;
-
-    return saturate(float4(finalRGB, originalAlpha));
+    return saturate(float4(texColor / max(weightSum, 0.001), originalAlpha));
 }
