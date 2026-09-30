@@ -102,13 +102,13 @@ jobs:
           Copy-Item "dist/DistortChroma_v$version.zip" "dist/DistortChroma_v$version.ymme"
           Get-ChildItem dist
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: DistortChroma_v${{ steps.version.outputs.version }}
           path: dist/*
 
       # CI でコンパイルしたシェーダー（リポジトリの .cso 更新用）
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: DistortChromaShader-cso
           path: DistortChroma/Shaders/DistortChromaShader.cso
