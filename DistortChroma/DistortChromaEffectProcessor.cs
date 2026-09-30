@@ -42,6 +42,9 @@ namespace DistortChroma
             float blur = (float)item.Blur.GetValue(frame, length, fps);
             float steps = (float)item.Steps.GetValue(frame, length, fps);
             float angle = (float)item.Angle.GetValue(frame, length, fps);
+            float hueStart = (float)item.HueStart.GetValue(frame, length, fps);
+            float hueRange = (float)item.HueRange.GetValue(frame, length, fps);
+            float center = (float)item.Center.GetValue(frame, length, fps) / 100f;
 
             try
             {
@@ -91,6 +94,9 @@ namespace DistortChroma
             _distortEffect.Blur = blur;
             _distortEffect.Steps = steps;
             _distortEffect.Angle = angle;
+            _distortEffect.HueStart = hueStart;
+            _distortEffect.HueRange = hueRange;
+            _distortEffect.Center = center;
 
             Output = _distortEffect.Output;
 

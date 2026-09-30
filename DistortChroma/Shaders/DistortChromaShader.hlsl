@@ -21,14 +21,27 @@ cbuffer Constants : register(b0)
     float Blur;
     float Steps;
     float Angle;
+    float HueStart; // 収差の開始色相（度）。歪み0側の色
+    float HueRange; // 収差の色相範囲（度）。歪み最大側の色 = HueStart + HueRange
+    float Center;   // ずれの基準位置（0～1）。0で元の位置から片側へ、0.5で元の位置を中心に両側へずらす
 };
 
-#define WARP_R -1.0
-#define WARP_G 0.0
-#define WARP_B 1.0
-#define COLOR_R float3(1.0, 0.0, 0.0)
-#define COLOR_G float3(0.0, 1.0, 0.0)
-#define COLOR_B float3(0.0, 0.0, 1.0)
+// 2つの色相間の円周上の距離（0～180度）
+float hueDistance(float a, float b)
+{
+    return abs(frac((a - b) / 360.0 + 0.5) - 0.5) * 360.0;
+}
+
+// 色相をRGBの重みに変換する。R=0度, G=120度, B=240度 を中心とした幅±120度の三角形の重み。
+// HueStart=0, HueRange=240 のとき、従来の固定スペクトル（赤→緑→青）と完全に一致します。
+float3 hueToWeight(float hue)
+{
+    return float3(
+        saturate(1.0 - hueDistance(hue, 0.0) / 120.0),
+        saturate(1.0 - hueDistance(hue, 120.0) / 120.0),
+        saturate(1.0 - hueDistance(hue, 240.0) / 120.0)
+    );
+}
 
 float getLuminance(float3 col)
 {
@@ -68,35 +81,37 @@ float3 computeNormal(float2 map_uv, float angle_val, float2 dmap_dx, float2 dmap
     return normal * 0.5 + 0.5;
 }
 
+// 法線ぼかしのサンプル数と黄金角
+static const int NORMAL_BLUR_SAMPLES = 48;
+static const float GOLDEN_ANGLE = 2.39996323;
+
+// 法線をガウスぼかしする。
+// 格子状に並べたサンプルだと、ぼかしを強くしたとき間隔が開いて縞模様や段差が出るため、
+// 黄金角スパイラル（Vogel配置）で円盤状に散らし、半径をガウス分布の分位点で決めて等重みで平均します。
+// こうすると少ないサンプル数でも格子の癖が出ず、どの方向にも均一で滑らかなぼかしになります。
 float3 smoothNormalBlur(float2 map_uv, float blurStrength, float angle_val, float2 dmap_dx, float2 dmap_dy)
 {
-    if (blurStrength <= 0.01)
-        return computeNormal(map_uv, angle_val, dmap_dx, dmap_dy, 0.0);
-    
+    blurStrength = max(blurStrength, 0.0);
+
+    // ぼかし半径（ガウスのσ, px）。0 付近から連続的に大きくなるので、滑らかさをアニメーションさせても飛びません
+    float sigma = blurStrength * 0.6 + saturate(blurStrength) * 2.0;
+    if (sigma <= 0.01)
+        return computeNormal(map_uv, angle_val, dmap_dx, dmap_dy, blurStrength);
+
     float3 result = float3(0, 0, 0);
-    float totalWeight = 0.0;
-    
-    int radius = 4;
-    float stride = 1.0 + (blurStrength * 0.3);
-    float sigma = (float) radius * 0.5;
 
     [loop]
-    for (int x = -radius; x <= radius; x++)
+    for (int i = 0; i < NORMAL_BLUR_SAMPLES; i++)
     {
-        [loop]
-        for (int y = -radius; y <= radius; y++)
-        {
-            float2 pixelOffset = float2(x, y) * stride;
-            float2 uvOffset = PixelToUVOffset(pixelOffset, dmap_dx, dmap_dy);
-            
-            float distSq = (x * x + y * y);
-            float weight = exp(-distSq / (2.0 * sigma * sigma));
-            
-            result += computeNormal(map_uv + uvOffset, angle_val, dmap_dx, dmap_dy, blurStrength) * weight;
-            totalWeight += weight;
-        }
+        float u = ((float) i + 0.5) / (float) NORMAL_BLUR_SAMPLES;
+        float radius = sigma * sqrt(-2.0 * log(1.0 - u));
+        float s, c;
+        sincos((float) i * GOLDEN_ANGLE, s, c);
+
+        float2 uvOffset = PixelToUVOffset(float2(c, s) * radius, dmap_dx, dmap_dy);
+        result += computeNormal(map_uv + uvOffset, angle_val, dmap_dx, dmap_dy, blurStrength);
     }
-    return result / totalWeight;
+    return result / (float) NORMAL_BLUR_SAMPLES;
 }
 
 float4 main(
@@ -110,7 +125,8 @@ float4 main(
     float2 map_uv = uv1.xy; // ★ MapTexture のサンプリングにはこれを使用する
     
     // ベース画像のアルファは t0 (InputTexture) を使用
-    float originalAlpha = InputTexture.Sample(InputSampler, uv).a;
+    float4 originalColor = InputTexture.Sample(InputSampler, uv);
+    float originalAlpha = originalColor.a;
     if (originalAlpha <= 0.001)
     {
         return float4(0.0, 0.0, 0.0, 0.0);
@@ -135,29 +151,24 @@ float4 main(
     {
         float fi = (float) i / (float) (maxSteps - 1);
         
-        float3 Chroma = float3(
-            max(0.0, 1.0 - abs(fi - ((WARP_R + 1.0) * 0.5)) * 2.0),
-            max(0.0, 1.0 - abs(fi - ((WARP_G + 1.0) * 0.5)) * 2.0),
-            max(0.0, 1.0 - abs(fi - ((WARP_B + 1.0) * 0.5)) * 2.0)
-        );
-        
-        float3 blurWeight = (COLOR_R * Chroma.r + COLOR_G * Chroma.g + COLOR_B * Chroma.b);
+        // このステップ（歪み量 fi）に割り当てる色相の色で重み付けする
+        float3 blurWeight = hueToWeight(HueStart + HueRange * fi);
         blurSum += blurWeight;
         
-        float2 displacementPixel = (normal.xy * 2.0 - 1.0) * Amount * fi;
+        float2 displacementPixel = (normal.xy * 2.0 - 1.0) * Amount * (fi - Center);
         float2 displacedUV = uv + PixelToUVOffset(displacementPixel, duvdx, duvdy);
 
         // 色のサンプリングは描画用である t0 (InputTexture) から行う
         texColor += blurWeight * InputTexture.Sample(InputSampler, displacedUV).rgb;
     }
 
-    float3 finalRGB = float3(0, 0, 0);
-    if (blurSum.r > 0.001)
-        finalRGB.r = texColor.r / blurSum.r;
-    if (blurSum.g > 0.001)
-        finalRGB.g = texColor.g / blurSum.g;
-    if (blurSum.b > 0.001)
-        finalRGB.b = texColor.b / blurSum.b;
+    // 色相範囲が狭いと、どのステップからも重みを受け取らないチャンネルが出るため、
+    // その場合は元の色（ずらさない）へ滑らかに寄せて色が欠けないようにする
+    const float fallbackWeight = 0.001;
+    float3 finalRGB = (texColor + originalColor.rgb * fallbackWeight) / (blurSum + fallbackWeight);
 
-    return saturate(float4(finalRGB, originalAlpha));
+    // 乗算済みアルファなので、色がアルファを超えないようにする（半透明の縁が不自然に明るくなるのを防ぐ）
+    finalRGB = min(saturate(finalRGB), originalAlpha);
+
+    return float4(finalRGB, originalAlpha);
 }
