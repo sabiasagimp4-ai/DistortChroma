@@ -23,6 +23,7 @@ cbuffer Constants : register(b0)
     float Angle;
     float HueStart; // 収差の開始色相（度）。歪み0側の色
     float HueRange; // 収差の色相範囲（度）。歪み最大側の色 = HueStart + HueRange
+    float Center;   // ずれの基準位置（0～1）。0で元の位置から片側へ、0.5で元の位置を中心に両側へずらす
 };
 
 // 2つの色相間の円周上の距離（0～180度）
@@ -80,35 +81,37 @@ float3 computeNormal(float2 map_uv, float angle_val, float2 dmap_dx, float2 dmap
     return normal * 0.5 + 0.5;
 }
 
+// 法線ぼかしのサンプル数と黄金角
+static const int NORMAL_BLUR_SAMPLES = 48;
+static const float GOLDEN_ANGLE = 2.39996323;
+
+// 法線をガウスぼかしする。
+// 格子状に並べたサンプルだと、ぼかしを強くしたとき間隔が開いて縞模様や段差が出るため、
+// 黄金角スパイラル（Vogel配置）で円盤状に散らし、半径をガウス分布の分位点で決めて等重みで平均します。
+// こうすると少ないサンプル数でも格子の癖が出ず、どの方向にも均一で滑らかなぼかしになります。
 float3 smoothNormalBlur(float2 map_uv, float blurStrength, float angle_val, float2 dmap_dx, float2 dmap_dy)
 {
-    if (blurStrength <= 0.01)
-        return computeNormal(map_uv, angle_val, dmap_dx, dmap_dy, 0.0);
-    
+    blurStrength = max(blurStrength, 0.0);
+
+    // ぼかし半径（ガウスのσ, px）。0 付近から連続的に大きくなるので、滑らかさをアニメーションさせても飛びません
+    float sigma = blurStrength * 0.6 + saturate(blurStrength) * 2.0;
+    if (sigma <= 0.01)
+        return computeNormal(map_uv, angle_val, dmap_dx, dmap_dy, blurStrength);
+
     float3 result = float3(0, 0, 0);
-    float totalWeight = 0.0;
-    
-    int radius = 4;
-    float stride = 1.0 + (blurStrength * 0.3);
-    float sigma = (float) radius * 0.5;
 
     [loop]
-    for (int x = -radius; x <= radius; x++)
+    for (int i = 0; i < NORMAL_BLUR_SAMPLES; i++)
     {
-        [loop]
-        for (int y = -radius; y <= radius; y++)
-        {
-            float2 pixelOffset = float2(x, y) * stride;
-            float2 uvOffset = PixelToUVOffset(pixelOffset, dmap_dx, dmap_dy);
-            
-            float distSq = (x * x + y * y);
-            float weight = exp(-distSq / (2.0 * sigma * sigma));
-            
-            result += computeNormal(map_uv + uvOffset, angle_val, dmap_dx, dmap_dy, blurStrength) * weight;
-            totalWeight += weight;
-        }
+        float u = ((float) i + 0.5) / (float) NORMAL_BLUR_SAMPLES;
+        float radius = sigma * sqrt(-2.0 * log(1.0 - u));
+        float s, c;
+        sincos((float) i * GOLDEN_ANGLE, s, c);
+
+        float2 uvOffset = PixelToUVOffset(float2(c, s) * radius, dmap_dx, dmap_dy);
+        result += computeNormal(map_uv + uvOffset, angle_val, dmap_dx, dmap_dy, blurStrength);
     }
-    return result / totalWeight;
+    return result / (float) NORMAL_BLUR_SAMPLES;
 }
 
 float4 main(
@@ -152,7 +155,7 @@ float4 main(
         float3 blurWeight = hueToWeight(HueStart + HueRange * fi);
         blurSum += blurWeight;
         
-        float2 displacementPixel = (normal.xy * 2.0 - 1.0) * Amount * fi;
+        float2 displacementPixel = (normal.xy * 2.0 - 1.0) * Amount * (fi - Center);
         float2 displacedUV = uv + PixelToUVOffset(displacementPixel, duvdx, duvdy);
 
         // 色のサンプリングは描画用である t0 (InputTexture) から行う
@@ -164,5 +167,8 @@ float4 main(
     const float fallbackWeight = 0.001;
     float3 finalRGB = (texColor + originalColor.rgb * fallbackWeight) / (blurSum + fallbackWeight);
 
-    return saturate(float4(finalRGB, originalAlpha));
+    // 乗算済みアルファなので、色がアルファを超えないようにする（半透明の縁が不自然に明るくなるのを防ぐ）
+    finalRGB = min(saturate(finalRGB), originalAlpha);
+
+    return float4(finalRGB, originalAlpha);
 }
