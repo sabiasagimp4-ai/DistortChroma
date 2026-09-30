@@ -17,6 +17,7 @@ namespace DistortChroma
         public float HueStart { set => SetValue((int)Props.HueStart, value); }
         public float HueRange { set => SetValue((int)Props.HueRange, value); }
         public float Center { set => SetValue((int)Props.Center, value); }
+        public float MapChannel { set => SetValue((int)Props.MapChannel, value); }
 
         public DistortChromaCustomEffect(IGraphicsDevicesAndContext devices) : base(Create<EffectImpl>(devices)) { }
 
@@ -30,11 +31,11 @@ namespace DistortChroma
             public float HueStart;
             public float HueRange;
             public float Center;
-            // HLSLの定数バッファは16バイト単位のため、32バイトに揃える
-            public float Padding0;
+            public float MapChannel;
+            // HLSLの定数バッファは16バイト単位のため、ここまでで32バイトちょうどになるように揃えている
         }
 
-        private enum Props { Amount, Blur, Steps, Angle, HueStart, HueRange, Center }
+        private enum Props { Amount, Blur, Steps, Angle, HueStart, HueRange, Center, MapChannel }
 
         // ★入力を2つ（描画用 t0, マップ用 t1）にするため 2 を指定
         [CustomEffect(2)]
@@ -83,7 +84,7 @@ namespace DistortChroma
 
             public EffectImpl() : base(LoadShader())
             {
-                constants = new ConstantBuffer { Amount = 10f, Blur = 3f, Steps = 10f, Angle = 0f, HueStart = 0f, HueRange = 240f, Center = 0f };
+                constants = new ConstantBuffer { Amount = 10f, Blur = 3f, Steps = 10f, Angle = 0f, HueStart = 0f, HueRange = 240f, Center = 0f, MapChannel = 0f };
             }
 
             [CustomEffectProperty(PropertyType.Float, (int)Props.Amount)] public float Amount { get => constants.Amount; set { constants.Amount = value; UpdateConstants(); } }
@@ -93,6 +94,7 @@ namespace DistortChroma
             [CustomEffectProperty(PropertyType.Float, (int)Props.HueStart)] public float HueStart { get => constants.HueStart; set { constants.HueStart = value; UpdateConstants(); } }
             [CustomEffectProperty(PropertyType.Float, (int)Props.HueRange)] public float HueRange { get => constants.HueRange; set { constants.HueRange = value; UpdateConstants(); } }
             [CustomEffectProperty(PropertyType.Float, (int)Props.Center)] public float Center { get => constants.Center; set { constants.Center = value; UpdateConstants(); } }
+            [CustomEffectProperty(PropertyType.Float, (int)Props.MapChannel)] public float MapChannel { get => constants.MapChannel; set { constants.MapChannel = value; UpdateConstants(); } }
         }
     }
 }

@@ -24,10 +24,19 @@ namespace DistortChroma
         Other
     }
 
+    public enum DistortChromaMapChannel
+    {
+        [Display(Name = "輝度")]
+        Luminance,
+        [Display(Name = "不透明度")]
+        Alpha
+    }
+
     [VideoEffect("DistortChroma", ["加工"], ["distort", "chroma", "歪み", "色収差", "色ズレ", "ブラー"])]
     internal class DistortChromaEffect : VideoEffectBase, IFileItem, IResourceItem
     {
         private DistortChromaMapSource sourceMode = DistortChromaMapSource.Self;
+        private DistortChromaMapChannel mapChannel = DistortChromaMapChannel.Luminance;
 
         public override string Label => "DistortChroma";
 
@@ -37,6 +46,14 @@ namespace DistortChroma
         {
             get => sourceMode;
             set => Set(ref sourceMode, value);
+        }
+
+        [Display(GroupName = "マップ", Name = "参照値", Description = "歪みの方向を何の変化から計算するかを選択します。「不透明度」にすると、模様や色の違いに影響されず、形の輪郭だけに沿って色ズレします。")]
+        [EnumComboBox]
+        public DistortChromaMapChannel MapChannel
+        {
+            get => mapChannel;
+            set => Set(ref mapChannel, value);
         }
 
         [Display(GroupName = "マップ", Name = "マップ画像", Description = "「別の画像・シーン」選択時に歪みのソースとして使用される画像です。", AutoGenerateField = true)]
@@ -73,7 +90,7 @@ namespace DistortChroma
 
         [Display(GroupName = "基本", Name = "角度", Description = "歪みの回転角度です。")]
         [AnimationSlider("F1", "度", -360, 360)]
-        public Animation Angle { get; } = new Animation(0f, -360, 360);
+        public Animation Angle { get; } = new Animation(0f, -36000, 36000);
 
         [Display(GroupName = "基本", Name = "基準位置", Description = "色ズレの基準位置です。0%で元の位置から片側へずれ、50%で元の位置を中心に両側へ広がる（全体の位置がずれない）ようになります。")]
         [AnimationSlider("F1", "%", 0, 100)]

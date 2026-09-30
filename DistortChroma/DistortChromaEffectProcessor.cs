@@ -97,6 +97,7 @@ namespace DistortChroma
             _distortEffect.HueStart = hueStart;
             _distortEffect.HueRange = hueRange;
             _distortEffect.Center = center;
+            _distortEffect.MapChannel = item.MapChannel == DistortChromaMapChannel.Alpha ? 1f : 0f;
 
             Output = _distortEffect.Output;
 

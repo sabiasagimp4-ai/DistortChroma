@@ -1,0 +1,135 @@
+name: Build
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      ymm4_url:
+        description: 'YMM4 の zip の URL（空なら公式サイトから自動で探します）'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      YMM4_URL: ${{ github.event.inputs.ymm4_url || vars.YMM4_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # プラグインのビルドには YMM4 本体の DLL が必要なので、公式サイトから YMM4 をダウンロードする
+      - name: Find YMM4 download URL
+        id: ymm4url
+        shell: pwsh
+        run: |
+          $url = $env:YMM4_URL
+          if (-not $url) {
+            $base = 'https://manjubox.net/ymm4/'
+            $page = Invoke-WebRequest -Uri $base -UseBasicParsing
+            $links = $page.Links | ForEach-Object { $_.href } | Where-Object { $_ -match '\.zip($|\?)' } |
+              ForEach-Object { ([System.Uri]::new([System.Uri]$base, $_)).AbsoluteUri } | Select-Object -Unique
+            $links | ForEach-Object { Write-Host "found: $_" }
+            # 容量の小さい Lite 版を優先する
+            $url = $links | Where-Object { $_ -match 'Lite' } | Select-Object -First 1
+            if (-not $url) { $url = $links | Select-Object -First 1 }
+          }
+          if (-not $url) { throw 'YMM4 のダウンロード URL が見つかりませんでした。workflow_dispatch の ymm4_url かリポジトリ変数 YMM4_URL で指定してください。' }
+          Write-Host "YMM4: $url"
+          "url=$url" >> $env:GITHUB_OUTPUT
+
+      - name: Cache YMM4
+        id: cache-ymm4
+        uses: actions/cache@v4
+        with:
+          path: ymm4
+          key: ymm4-${{ steps.ymm4url.outputs.url }}
+
+      - name: Download YMM4
+        if: steps.cache-ymm4.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest -Uri '${{ steps.ymm4url.outputs.url }}' -OutFile ymm4.zip -UseBasicParsing
+          Expand-Archive ymm4.zip -DestinationPath ymm4-full
+          # 参照に必要な DLL だけを残してキャッシュを小さくする
+          $pluginDll = Get-ChildItem ymm4-full -Recurse -Filter YukkuriMovieMaker.Plugin.dll | Select-Object -First 1
+          if (-not $pluginDll) { throw 'YukkuriMovieMaker.Plugin.dll が見つかりません' }
+          New-Item -ItemType Directory ymm4 | Out-Null
+          Get-ChildItem $pluginDll.DirectoryName -Filter *.dll | Copy-Item -Destination ymm4
+          Get-ChildItem $pluginDll.DirectoryName -Filter YukkuriMovieMaker.exe | Copy-Item -Destination ymm4
+          Get-ChildItem ymm4 | Select-Object -ExpandProperty Name
+
+      - name: Decide version
+        id: version
+        shell: pwsh
+        run: |
+          if ('${{ github.ref_type }}' -eq 'tag') {
+            $version = '${{ github.ref_name }}'.TrimStart('v')
+          } else {
+            $version = ([xml](Get-Content DistortChroma/DistortChroma.csproj)).Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
+          }
+          Write-Host "version: $version"
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Build
+        shell: pwsh
+        run: >
+          dotnet build DistortChroma/DistortChroma.csproj -c Release
+          "-p:YMM4DirPath=${{ github.workspace }}/ymm4/"
+          -p:CopyToYmm4=false
+          "-p:Version=${{ steps.version.outputs.version }}"
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          $dll = Get-ChildItem DistortChroma/bin/Release -Recurse -Filter DistortChroma.dll | Select-Object -First 1
+          New-Item -ItemType Directory pkg/DistortChroma, dist -Force | Out-Null
+          Copy-Item $dll.FullName pkg/DistortChroma/
+          Copy-Item Readme.md, LICENSE pkg/DistortChroma/
+          # .ymme は zip の拡張子を変えたもの。zip 内の親フォルダ名がプラグインフォルダ名になる
+          Compress-Archive -Path pkg/DistortChroma -DestinationPath "dist/DistortChroma_v$version.zip"
+          Copy-Item "dist/DistortChroma_v$version.zip" "dist/DistortChroma_v$version.ymme"
+          Get-ChildItem dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DistortChroma_v${{ steps.version.outputs.version }}
+          path: dist/*
+
+      # CI でコンパイルしたシェーダー（リポジトリの .cso 更新用）
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DistortChromaShader-cso
+          path: DistortChroma/Shaders/DistortChromaShader.cso
+
+      - name: Create release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ github.ref_name }}'
+          # Readme の「アップデート内容」から該当バージョンの記述を取り出してリリースノートにする
+          $lines = Get-Content Readme.md -Encoding utf8
+          $start = [Array]::IndexOf(($lines | ForEach-Object { $_.Trim() }), $tag)
+          $notes = @()
+          if ($start -ge 0) {
+            for ($i = $start + 1; $i -lt $lines.Count -and $lines[$i].Trim() -ne ''; $i++) { $notes += '- ' + $lines[$i].Trim() }
+          }
+          $notes += ''
+          $notes += '## インストール'
+          $notes += '`.ymme` ファイルをダブルクリックするとインストールできます（YMM4 を終了してから実行してください）。'
+          $notes += '手動の場合は zip を展開し、`DistortChroma` フォルダを YMM4 の `user\plugin` フォルダに入れてください。'
+          $notes -join "`n" | Out-File notes.md -Encoding utf8
+          gh release create $tag dist/* --title $tag --notes-file notes.md
