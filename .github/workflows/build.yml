@@ -21,9 +21,9 @@ jobs:
     env:
       YMM4_URL: ${{ github.event.inputs.ymm4_url || vars.YMM4_URL }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '10.0.x'
 
@@ -49,7 +49,7 @@ jobs:
 
       - name: Cache YMM4
         id: cache-ymm4
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ymm4
           key: ymm4-${{ steps.ymm4url.outputs.url }}
@@ -102,13 +102,13 @@ jobs:
           Copy-Item "dist/DistortChroma_v$version.zip" "dist/DistortChroma_v$version.ymme"
           Get-ChildItem dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: DistortChroma_v${{ steps.version.outputs.version }}
           path: dist/*
 
       # CI でコンパイルしたシェーダー（リポジトリの .cso 更新用）
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: DistortChromaShader-cso
           path: DistortChroma/Shaders/DistortChromaShader.cso

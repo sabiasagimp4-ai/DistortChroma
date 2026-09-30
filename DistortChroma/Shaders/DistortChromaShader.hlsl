@@ -102,23 +102,29 @@ float3 smoothNormalBlur(float2 map_uv, float blurStrength, float angle_val, floa
 
     // ぼかし半径（ガウスのσ, px）。0 付近から連続的に大きくなるので、滑らかさをアニメーションさせても飛びません
     float sigma = blurStrength * 0.6 + saturate(blurStrength) * 2.0;
-    if (sigma <= 0.01)
-        return computeNormal(map_uv, angle_val, dmap_dx, dmap_dy, blurStrength);
 
     float3 result = float3(0, 0, 0);
-
-    [loop]
-    for (int i = 0; i < NORMAL_BLUR_SAMPLES; i++)
+    [branch]
+    if (sigma <= 0.01)
     {
-        float u = ((float) i + 0.5) / (float) NORMAL_BLUR_SAMPLES;
-        float radius = sigma * sqrt(-2.0 * log(1.0 - u));
-        float s, c;
-        sincos((float) i * GOLDEN_ANGLE, s, c);
-
-        float2 uvOffset = PixelToUVOffset(float2(c, s) * radius, dmap_dx, dmap_dy);
-        result += computeNormal(map_uv + uvOffset, angle_val, dmap_dx, dmap_dy, blurStrength);
+        result = computeNormal(map_uv, angle_val, dmap_dx, dmap_dy, blurStrength);
     }
-    return result / (float) NORMAL_BLUR_SAMPLES;
+    else
+    {
+        [loop]
+        for (int i = 0; i < NORMAL_BLUR_SAMPLES; i++)
+        {
+            float u = ((float) i + 0.5) / (float) NORMAL_BLUR_SAMPLES;
+            float radius = sigma * sqrt(-2.0 * log(1.0 - u));
+            float s, c;
+            sincos((float) i * GOLDEN_ANGLE, s, c);
+
+            float2 uvOffset = PixelToUVOffset(float2(c, s) * radius, dmap_dx, dmap_dy);
+            result += computeNormal(map_uv + uvOffset, angle_val, dmap_dx, dmap_dy, blurStrength);
+        }
+        result /= (float) NORMAL_BLUR_SAMPLES;
+    }
+    return result;
 }
 
 float4 main(
@@ -166,7 +172,8 @@ float4 main(
         float2 displacedUV = uv + PixelToUVOffset(displacementPixel, duvdx, duvdy);
 
         // 色のサンプリングは描画用である t0 (InputTexture) から行う
-        texColor += blurWeight * InputTexture.Sample(InputSampler, displacedUV).rgb;
+        // ループ内では暗黙の偏微分が不定になるため、ミップレベルを明示してサンプリングする（入力にミップマップは無い）
+        texColor += blurWeight * InputTexture.SampleLevel(InputSampler, displacedUV, 0).rgb;
     }
 
     // 色相範囲が狭いと、どのステップからも重みを受け取らないチャンネルが出るため、

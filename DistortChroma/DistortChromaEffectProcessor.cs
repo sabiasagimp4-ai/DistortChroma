@@ -17,7 +17,9 @@ namespace DistortChroma
         private DistortChromaCustomEffect? _distortEffect;
 
         private IBrushSource? brushSource;
+        private Type? brushType;
         private ID2D1CommandList? patternCommandList;
+        private RawRectF patternBounds;
 
         public ID2D1Image Output { get; private set; } = null!;
 
@@ -61,26 +63,41 @@ namespace DistortChroma
             // ソースに「別の画像・シーン」が選ばれている場合
             if (item.SourceMode == DistortChromaMapSource.Other)
             {
-                brushSource ??= item.Brush.CreateBrush(devices);
-                brushSource.Update((TimelineItemSourceDescription)effectDescription);
-
                 var deviceContext = devices.DeviceContext;
                 var bounds = deviceContext.GetImageLocalBounds(this.input);
 
-                patternCommandList?.Dispose();
-                patternCommandList = deviceContext.CreateCommandList();
+                // マップ画像の種類（画像・グラデーションなど）が変わったらブラシを作り直す
+                bool isChanged = false;
+                var type = item.Brush.Type;
+                if (brushSource is null || brushType != type)
+                {
+                    brushSource?.Dispose();
+                    brushSource = item.Brush.CreateBrush(devices);
+                    brushType = type;
+                    isChanged = true;
+                }
+                isChanged |= brushSource.Update(new BrushSourceDescription(effectDescription, bounds));
+                isChanged |= patternCommandList is null || !patternBounds.Equals(bounds);
 
-                deviceContext.Target = patternCommandList;
-                deviceContext.BeginDraw();
-                deviceContext.Clear(null);
+                // ブラシの内容や範囲が変わったときだけマップを描き直す
+                if (isChanged)
+                {
+                    patternCommandList?.Dispose();
+                    patternCommandList = deviceContext.CreateCommandList();
 
-                // ★ 最適化：巨大なパッド付き(rect)ではなく、元の画像サイズ(bounds)に描画を限定します。
-                // これにより、どれだけ歪み強度を大きくしても、別画像・シーンのレンダリング負荷が肥大化しません。
-                deviceContext.FillRectangle(bounds, brushSource.Brush);
+                    deviceContext.Target = patternCommandList;
+                    deviceContext.BeginDraw();
+                    deviceContext.Clear(null);
 
-                deviceContext.EndDraw();
-                deviceContext.Target = null;
-                patternCommandList.Close();
+                    // ★ 最適化：巨大なパッド付き(rect)ではなく、元の画像サイズ(bounds)に描画を限定します。
+                    // これにより、どれだけ歪み強度を大きくしても、別画像・シーンのレンダリング負荷が肥大化しません。
+                    deviceContext.FillRectangle(bounds, brushSource.Brush);
+
+                    deviceContext.EndDraw();
+                    deviceContext.Target = null;
+                    patternCommandList.Close();
+                    patternBounds = bounds;
+                }
 
                 _distortEffect.SetInput(1, patternCommandList, true); // t1に画像を渡す
             }
@@ -113,7 +130,7 @@ namespace DistortChroma
             _distortEffect?.Dispose(); _distortEffect = null;
 
             patternCommandList?.Dispose(); patternCommandList = null;
-            brushSource?.Dispose(); brushSource = null;
+            brushSource?.Dispose(); brushSource = null; brushType = null;
 
             Output?.Dispose(); Output = null!;
             this.input = null;
