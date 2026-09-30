@@ -24,6 +24,7 @@ cbuffer Constants : register(b0)
     float HueStart; // 収差の開始色相（度）。歪み0側の色
     float HueRange; // 収差の色相範囲（度）。歪み最大側の色 = HueStart + HueRange
     float Center;   // ずれの基準位置（0～1）。0で元の位置から片側へ、0.5で元の位置を中心に両側へずらす
+    float MapChannel; // マップの参照値。0: 輝度, 1: 不透明度（アルファ）
 };
 
 // 2つの色相間の円周上の距離（0～180度）
@@ -48,6 +49,12 @@ float getLuminance(float3 col)
     return dot(col, float3(0.2126, 0.7152, 0.0722));
 }
 
+// マップから歪みの元になる値を取り出す
+float getMapValue(float4 col)
+{
+    return MapChannel < 0.5 ? getLuminance(col.rgb) : col.a;
+}
+
 float2 PixelToUVOffset(float2 pixelOffset, float2 duvdx, float2 duvdy)
 {
     return pixelOffset.x * duvdx + pixelOffset.y * duvdy;
@@ -61,11 +68,11 @@ float3 computeNormal(float2 map_uv, float angle_val, float2 dmap_dx, float2 dmap
     float2 offX = PixelToUVOffset(float2(sampleDist, 0.0), dmap_dx, dmap_dy);
     float2 offY = PixelToUVOffset(float2(0.0, sampleDist), dmap_dx, dmap_dy);
     
-    // t1 から輝度差分を計算
-    float gx = getLuminance(MapTexture.SampleLevel(MapSampler, map_uv + offX, 0).rgb)
-             - getLuminance(MapTexture.SampleLevel(MapSampler, map_uv - offX, 0).rgb);
-    float gy = getLuminance(MapTexture.SampleLevel(MapSampler, map_uv + offY, 0).rgb)
-             - getLuminance(MapTexture.SampleLevel(MapSampler, map_uv - offY, 0).rgb);
+    // t1 から輝度（または不透明度）の差分を計算
+    float gx = getMapValue(MapTexture.SampleLevel(MapSampler, map_uv + offX, 0))
+             - getMapValue(MapTexture.SampleLevel(MapSampler, map_uv - offX, 0));
+    float gy = getMapValue(MapTexture.SampleLevel(MapSampler, map_uv + offY, 0))
+             - getMapValue(MapTexture.SampleLevel(MapSampler, map_uv - offY, 0));
              
     float3 normal = normalize(float3(-gx * 4.0, -gy * 4.0, 1.0));
     
@@ -95,23 +102,29 @@ float3 smoothNormalBlur(float2 map_uv, float blurStrength, float angle_val, floa
 
     // ぼかし半径（ガウスのσ, px）。0 付近から連続的に大きくなるので、滑らかさをアニメーションさせても飛びません
     float sigma = blurStrength * 0.6 + saturate(blurStrength) * 2.0;
-    if (sigma <= 0.01)
-        return computeNormal(map_uv, angle_val, dmap_dx, dmap_dy, blurStrength);
 
     float3 result = float3(0, 0, 0);
-
-    [loop]
-    for (int i = 0; i < NORMAL_BLUR_SAMPLES; i++)
+    [branch]
+    if (sigma <= 0.01)
     {
-        float u = ((float) i + 0.5) / (float) NORMAL_BLUR_SAMPLES;
-        float radius = sigma * sqrt(-2.0 * log(1.0 - u));
-        float s, c;
-        sincos((float) i * GOLDEN_ANGLE, s, c);
-
-        float2 uvOffset = PixelToUVOffset(float2(c, s) * radius, dmap_dx, dmap_dy);
-        result += computeNormal(map_uv + uvOffset, angle_val, dmap_dx, dmap_dy, blurStrength);
+        result = computeNormal(map_uv, angle_val, dmap_dx, dmap_dy, blurStrength);
     }
-    return result / (float) NORMAL_BLUR_SAMPLES;
+    else
+    {
+        [loop]
+        for (int i = 0; i < NORMAL_BLUR_SAMPLES; i++)
+        {
+            float u = ((float) i + 0.5) / (float) NORMAL_BLUR_SAMPLES;
+            float radius = sigma * sqrt(-2.0 * log(1.0 - u));
+            float s, c;
+            sincos((float) i * GOLDEN_ANGLE, s, c);
+
+            float2 uvOffset = PixelToUVOffset(float2(c, s) * radius, dmap_dx, dmap_dy);
+            result += computeNormal(map_uv + uvOffset, angle_val, dmap_dx, dmap_dy, blurStrength);
+        }
+        result /= (float) NORMAL_BLUR_SAMPLES;
+    }
+    return result;
 }
 
 float4 main(
@@ -159,7 +172,8 @@ float4 main(
         float2 displacedUV = uv + PixelToUVOffset(displacementPixel, duvdx, duvdy);
 
         // 色のサンプリングは描画用である t0 (InputTexture) から行う
-        texColor += blurWeight * InputTexture.Sample(InputSampler, displacedUV).rgb;
+        // ループ内では暗黙の偏微分が不定になるため、ミップレベルを明示してサンプリングする（入力にミップマップは無い）
+        texColor += blurWeight * InputTexture.SampleLevel(InputSampler, displacedUV, 0).rgb;
     }
 
     // 色相範囲が狭いと、どのステップからも重みを受け取らないチャンネルが出るため、
