@@ -11,6 +11,11 @@ on:
         description: 'YMM4 の zip の URL（空なら公式サイトから自動で探します）'
         required: false
         default: ''
+      release:
+        description: 'リリースを作成する（csproj の Version から v○.○.○ タグを作成します）'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
@@ -80,6 +85,7 @@ jobs:
           }
           Write-Host "version: $version"
           "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=v$version" >> $env:GITHUB_OUTPUT
 
       - name: Build
         shell: pwsh
@@ -113,13 +119,14 @@ jobs:
           name: DistortChromaShader-cso
           path: DistortChroma/Shaders/DistortChromaShader.cso
 
+      # v* タグの push、または手動実行で「release」にチェックを入れたときにリリースを作成する
       - name: Create release
-        if: github.ref_type == 'tag'
+        if: github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.release)
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = '${{ github.ref_name }}'
+          $tag = '${{ steps.version.outputs.tag }}'
           # Readme の「アップデート内容」から該当バージョンの記述を取り出してリリースノートにする
           $lines = Get-Content Readme.md -Encoding utf8
           $start = [Array]::IndexOf(($lines | ForEach-Object { $_.Trim() }), $tag)
@@ -132,4 +139,5 @@ jobs:
           $notes += '`.ymme` ファイルをダブルクリックするとインストールできます（YMM4 を終了してから実行してください）。'
           $notes += '手動の場合は zip を展開し、`DistortChroma` フォルダを YMM4 の `user\plugin` フォルダに入れてください。'
           $notes -join "`n" | Out-File notes.md -Encoding utf8
-          gh release create $tag dist/* --title $tag --notes-file notes.md
+          # タグが無ければ、ビルドしたコミットにタグを作ってからリリースする
+          gh release create $tag dist/* --title $tag --notes-file notes.md --target '${{ github.sha }}'
