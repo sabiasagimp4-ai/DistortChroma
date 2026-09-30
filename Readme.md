@@ -85,6 +85,12 @@ v0.3.0
 .ymme ファイルでのインストールに対応  
 マップ画像の種類（画像・グラデーションなど）を変更しても反映されないことがある問題を修正
 
+## 開発者向け：ビルドとリリース
+
+- ローカルでは `Directory.Build.props` の `YMM4DirPath` に YMM4 のフォルダを指定してビルドします（シェーダーは Windows SDK の fxc.exe で自動コンパイルされます）。
+- GitHub Actions が push・プルリクエストごとに YMM4 を取得してビルドし、`.ymme` と `.zip` をアーティファクトとして保存します。
+- リリースするときは、`DistortChroma.csproj` の `Version` と、この Readme の「アップデート内容」を更新してから、Actions の「Build」ワークフローを「Run workflow」で `release` にチェックを入れて実行します（`v○.○.○` タグの push でもリリースされます）。
+
 ## ライセンス
 
 本プロジェクトは、MIT License のもと公開しています。  
