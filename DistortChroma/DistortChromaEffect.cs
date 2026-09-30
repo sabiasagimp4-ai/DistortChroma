@@ -75,6 +75,14 @@ namespace DistortChroma
         [AnimationSlider("F1", "度", -360, 360)]
         public Animation Angle { get; } = new Animation(0f, -360, 360);
 
+        [Display(GroupName = "色", Name = "色相", Description = "収差の開始色（歪みが0の側の色）を色相で指定します。0で赤、120で緑、240で青です。")]
+        [AnimationSlider("F1", "度", 0, 360)]
+        public Animation HueStart { get; } = new Animation(0f, -3600, 3600);
+
+        [Display(GroupName = "色", Name = "色相範囲", Description = "開始色から歪み最大側の色までの色相の幅です。240で従来通り（赤→緑→青）、360で虹色一周、マイナスで逆回りになります。")]
+        [AnimationSlider("F1", "度", -360, 360)]
+        public Animation HueRange { get; } = new Animation(240f, -3600, 3600);
+
         public override IEnumerable<string> CreateExoVideoFilters(int keyFrameIndex, ExoOutputDescription exoOutputDescription) => [];
 
         public override IVideoEffectProcessor CreateVideoEffect(IGraphicsDevicesAndContext devices)
@@ -82,7 +90,7 @@ namespace DistortChroma
             return new DistortChromaEffectProcessor(devices, this);
         }
 
-        protected override IEnumerable<IAnimatable> GetAnimatables() => [Amount, Blur, Steps, Angle, Brush];
+        protected override IEnumerable<IAnimatable> GetAnimatables() => [Amount, Blur, Steps, Angle, HueStart, HueRange, Brush];
 
         // --- パッケージング・ファイルパス一括置換への対応 ---
         public override IEnumerable<string> GetFiles()

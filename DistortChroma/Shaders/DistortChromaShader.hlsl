@@ -21,14 +21,26 @@ cbuffer Constants : register(b0)
     float Blur;
     float Steps;
     float Angle;
+    float HueStart; // 収差の開始色相（度）。歪み0側の色
+    float HueRange; // 収差の色相範囲（度）。歪み最大側の色 = HueStart + HueRange
 };
 
-#define WARP_R -1.0
-#define WARP_G 0.0
-#define WARP_B 1.0
-#define COLOR_R float3(1.0, 0.0, 0.0)
-#define COLOR_G float3(0.0, 1.0, 0.0)
-#define COLOR_B float3(0.0, 0.0, 1.0)
+// 2つの色相間の円周上の距離（0～180度）
+float hueDistance(float a, float b)
+{
+    return abs(frac((a - b) / 360.0 + 0.5) - 0.5) * 360.0;
+}
+
+// 色相をRGBの重みに変換する。R=0度, G=120度, B=240度 を中心とした幅±120度の三角形の重み。
+// HueStart=0, HueRange=240 のとき、従来の固定スペクトル（赤→緑→青）と完全に一致します。
+float3 hueToWeight(float hue)
+{
+    return float3(
+        saturate(1.0 - hueDistance(hue, 0.0) / 120.0),
+        saturate(1.0 - hueDistance(hue, 120.0) / 120.0),
+        saturate(1.0 - hueDistance(hue, 240.0) / 120.0)
+    );
+}
 
 float getLuminance(float3 col)
 {
@@ -110,7 +122,8 @@ float4 main(
     float2 map_uv = uv1.xy; // ★ MapTexture のサンプリングにはこれを使用する
     
     // ベース画像のアルファは t0 (InputTexture) を使用
-    float originalAlpha = InputTexture.Sample(InputSampler, uv).a;
+    float4 originalColor = InputTexture.Sample(InputSampler, uv);
+    float originalAlpha = originalColor.a;
     if (originalAlpha <= 0.001)
     {
         return float4(0.0, 0.0, 0.0, 0.0);
@@ -135,13 +148,8 @@ float4 main(
     {
         float fi = (float) i / (float) (maxSteps - 1);
         
-        float3 Chroma = float3(
-            max(0.0, 1.0 - abs(fi - ((WARP_R + 1.0) * 0.5)) * 2.0),
-            max(0.0, 1.0 - abs(fi - ((WARP_G + 1.0) * 0.5)) * 2.0),
-            max(0.0, 1.0 - abs(fi - ((WARP_B + 1.0) * 0.5)) * 2.0)
-        );
-        
-        float3 blurWeight = (COLOR_R * Chroma.r + COLOR_G * Chroma.g + COLOR_B * Chroma.b);
+        // このステップ（歪み量 fi）に割り当てる色相の色で重み付けする
+        float3 blurWeight = hueToWeight(HueStart + HueRange * fi);
         blurSum += blurWeight;
         
         float2 displacementPixel = (normal.xy * 2.0 - 1.0) * Amount * fi;
@@ -151,13 +159,10 @@ float4 main(
         texColor += blurWeight * InputTexture.Sample(InputSampler, displacedUV).rgb;
     }
 
-    float3 finalRGB = float3(0, 0, 0);
-    if (blurSum.r > 0.001)
-        finalRGB.r = texColor.r / blurSum.r;
-    if (blurSum.g > 0.001)
-        finalRGB.g = texColor.g / blurSum.g;
-    if (blurSum.b > 0.001)
-        finalRGB.b = texColor.b / blurSum.b;
+    // 色相範囲が狭いと、どのステップからも重みを受け取らないチャンネルが出るため、
+    // その場合は元の色（ずらさない）へ滑らかに寄せて色が欠けないようにする
+    const float fallbackWeight = 0.001;
+    float3 finalRGB = (texColor + originalColor.rgb * fallbackWeight) / (blurSum + fallbackWeight);
 
     return saturate(float4(finalRGB, originalAlpha));
 }
